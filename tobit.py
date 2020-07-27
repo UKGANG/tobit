@@ -2,17 +2,19 @@ import math
 
 import numpy as np
 import pandas as pd
-import scipy.stats
+import scipy
 from scipy.optimize import minimize
 from scipy.special import log_ndtr
+from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_absolute_error
 
 
-class TobitModel:
-    def __init__(self, p_censor_left, p_censor_right, verbose=False):
+class TobitRegressor(BaseEstimator, RegressorMixin):
+
+    def __init__(self, p_censor_left, p_censor_right, C, verbose=False):
         self._p_censor_left = p_censor_left
         self._p_censor_right = p_censor_right
+        self._C = C
         self._verbose = verbose
         self.ols_coef_ = None
         self.ols_intercept = None
@@ -20,25 +22,25 @@ class TobitModel:
         self.intercept_ = None
         self.sigma_ = None
 
-    def fit(self, x, y):
+    def fit(self, X, y):
         """
         Fit a maximum-likelihood Tobit regression
         :param x: Pandas DataFrame (n_samples, n_features): Data
         :param y: Pandas Series (n_samples,): Target
         :return:
         """
-        x_copy = x.copy()
-        x_copy.insert(0, 'intercept', 1.0)
-        init_reg = LinearRegression(fit_intercept=False).fit(x_copy, y)
+        X = X.copy()
+        X.insert(0, 'intercept', 1.0)
+        init_reg = LinearRegression(fit_intercept=False).fit(X, y)
         b0 = init_reg.coef_
-        y_pred = init_reg.predict(x_copy)
+        y_pred = init_reg.predict(X)
         resid = y - y_pred
         resid_var = np.var(resid)
         s0 = np.sqrt(resid_var)
         params0 = np.append(b0, s0)
 
-        result = minimize(lambda params: self._tobit_neg_log_likelihood(x_copy, y, params), params0, method='L-BFGS-B',
-                          jac=lambda params: self._tobit_neg_log_likelihood_der(x_copy, y, params), options={'disp': self._verbose})
+        result = minimize(lambda params: self._tobit_neg_log_likelihood(X, y, params), params0, method='L-BFGS-B',
+                          jac=lambda params: self._tobit_neg_log_likelihood_der(X, y, params), options={'disp': self._verbose})
         if self._verbose:
             print(result)
         self.ols_coef_ = b0[1:]
@@ -49,11 +51,7 @@ class TobitModel:
         return self
 
     def predict(self, x):
-        return self.intercept_ + x@self.coef_
-
-    def score(self, x, y, scoring_function=mean_absolute_error):
-        y_pred = x@self.coef_
-        return scoring_function(y, y_pred)
+        return self.intercept_ + x @ self.coef_
 
     def _get_censor_idx(self, y):
         idx_left = pd.Series(y) <= self._p_censor_left
@@ -94,7 +92,8 @@ class TobitModel:
         else:
             mid_sum = 0
 
-        loglik = cens_sum + mid_sum
+        l1 = 0
+        loglik = cens_sum + mid_sum - self._C * l1
 
         return -loglik
 
@@ -140,6 +139,25 @@ class TobitModel:
             mid_sigma = (np.square(mid_stats) - 1).sum()
             sigma_jac += mid_sigma
 
+        l1 = 0
+        beta_jac += self._C * l1
         combo_jac = np.append(beta_jac, sigma_jac / s)  # by chain rule, since the expression above is dloglik/dlogsigma
 
         return -combo_jac
+
+    def score(self, X, y, sample_weight=None):
+        return -self._tobit_neg_log_likelihood(X, y, [*self.coef_, self.sigma_])
+
+    def get_params(self, deep=True):
+        # suppose this estimator has parameters "alpha" and "recursive"
+        return {
+            "C": self._C,
+            "p_censor_left": self._p_censor_left,
+            "p_censor_right": self._p_censor_right,
+            "verbose": self._verbose,
+        }
+
+    def set_params(self, **parameters):
+        for parameter, value in parameters.items():
+            setattr(self, parameter, value)
+        return self
