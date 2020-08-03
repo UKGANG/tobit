@@ -3,18 +3,17 @@ import math
 import numpy as np
 import pandas as pd
 import scipy
-from scipy.optimize import minimize
-from scipy.special import log_ndtr
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.linear_model import LinearRegression
 
 
 class TobitRegressor(BaseEstimator, RegressorMixin):
 
-    def __init__(self, p_censor_left, p_censor_right, C, verbose=False):
+    def __init__(self, p_censor_left, p_censor_right, C, alpha, verbose=False):
         self._p_censor_left = p_censor_left
         self._p_censor_right = p_censor_right
         self._C = C
+        self._alpha = alpha
         self._verbose = verbose
         self.ols_coef_ = None
         self.ols_intercept = None
@@ -25,11 +24,18 @@ class TobitRegressor(BaseEstimator, RegressorMixin):
     def fit(self, X, y):
         """
         Fit a maximum-likelihood Tobit regression
-        :param x: Pandas DataFrame (n_samples, n_features): Data
+        :param X: Pandas DataFrame (n_samples, n_features): Data
         :param y: Pandas Series (n_samples,): Target
         :return:
         """
         X = X.copy()
+        y = y.copy()
+
+        # Remove index to avoid incorrect numpy broadcast
+        X.reset_index(drop=True, inplace=True)
+        y.reset_index(drop=True, inplace=True)
+
+        # Initialize the guess with OLS
         X.insert(0, 'intercept', 1.0)
         init_reg = LinearRegression(fit_intercept=False).fit(X, y)
         b0 = init_reg.coef_
@@ -39,10 +45,13 @@ class TobitRegressor(BaseEstimator, RegressorMixin):
         s0 = np.sqrt(resid_var)
         params0 = np.append(b0, s0)
 
-        result = minimize(lambda params: self._tobit_neg_log_likelihood(X, y, params), params0, method='L-BFGS-B',
+        # L-BFGS-B optimization
+        result = scipy.optimize.minimize(lambda params: self._tobit_neg_log_likelihood(X, y, params), params0, method='L-BFGS-B',
                           jac=lambda params: self._tobit_neg_log_likelihood_der(X, y, params), options={'disp': self._verbose})
         if self._verbose:
             print(result)
+
+        # Construct the result
         self.ols_coef_ = b0[1:]
         self.ols_intercept = b0[0]
         self.intercept_ = result.x[1]
@@ -57,12 +66,15 @@ class TobitRegressor(BaseEstimator, RegressorMixin):
         idx_left = pd.Series(y) <= self._p_censor_left
         idx_mid = (pd.Series(y) > self._p_censor_left) & (pd.Series(y) < self._p_censor_right)
         idx_right = pd.Series(y) >= self._p_censor_right
-        return idx_left, idx_mid, idx_right
+        return idx_left.tolist(), idx_mid.tolist(), idx_right.tolist()
 
     def _tobit_neg_log_likelihood(self, xs, ys, params):
         idx_left, idx_mid, idx_right = self._get_censor_idx(ys)
         x_left, x_mid, x_right = xs[idx_left], xs[idx_mid], xs[idx_right]
         y_left, y_mid, y_right = ys[idx_left], ys[idx_mid], ys[idx_right]
+
+        for df in [x_left, x_mid, x_right, y_left, y_mid, y_right]:
+            df.reset_index(drop=True, inplace=True)
 
         b = params[:-1]
         s = params[-1]
@@ -92,8 +104,11 @@ class TobitRegressor(BaseEstimator, RegressorMixin):
         else:
             mid_sum = 0
 
-        l1 = 0
-        loglik = cens_sum + mid_sum - self._C * l1
+        loglik = cens_sum + mid_sum
+
+        l1 = scipy.linalg.norm(params, ord=1)
+        l2 = scipy.linalg.norm(params, ord=2) ** 2 / 2
+        loglik -= self._C * (self._alpha * l1 + (1 - self._alpha) * l2)
 
         return -loglik
 
@@ -101,6 +116,9 @@ class TobitRegressor(BaseEstimator, RegressorMixin):
         idx_left, idx_mid, idx_right = self._get_censor_idx(ys)
         x_left, x_mid, x_right = xs[idx_left], xs[idx_mid], xs[idx_right]
         y_left, y_mid, y_right = ys[idx_left], ys[idx_mid], ys[idx_right]
+
+        for df in [x_left, x_mid, x_right, y_left, y_mid, y_right]:
+            df.reset_index(drop=True, inplace=True)
 
         b = params[:-1]
         # s = math.exp(params[-1]) # in censReg, not using chain rule as below; they optimize in terms of log(s)
@@ -112,7 +130,7 @@ class TobitRegressor(BaseEstimator, RegressorMixin):
         if len(idx_left) > 0:
             left_stats = (y_left - x_left@b) / s
             l_pdf = scipy.stats.norm.logpdf(left_stats)
-            l_cdf = log_ndtr(left_stats)
+            l_cdf = scipy.special.log_ndtr(left_stats)
             left_frac = np.exp(l_pdf - l_cdf)
             beta_left = left_frac@(x_left / s)
             beta_jac -= beta_left
@@ -123,7 +141,7 @@ class TobitRegressor(BaseEstimator, RegressorMixin):
         if len(idx_right) > 0:
             right_stats = (x_right@b - y_right) / s
             r_pdf = scipy.stats.norm.logpdf(right_stats)
-            r_cdf = log_ndtr(right_stats)
+            r_cdf = scipy.special.log_ndtr(right_stats)
             right_frac = np.exp(r_pdf - r_cdf)
             beta_right = right_frac@(x_right / s)
             beta_jac += beta_right
@@ -139,9 +157,11 @@ class TobitRegressor(BaseEstimator, RegressorMixin):
             mid_sigma = (np.square(mid_stats) - 1).sum()
             sigma_jac += mid_sigma
 
-        l1 = 0
-        beta_jac += self._C * l1
         combo_jac = np.append(beta_jac, sigma_jac / s)  # by chain rule, since the expression above is dloglik/dlogsigma
+
+        l1 = np.vectorize(lambda e: 1 if e > 0 else -1 if e < 0 else 0)(params)
+        l2 = params
+        combo_jac -= self._C * (self._alpha * l1 + (1 - self._alpha) * l2)
 
         return -combo_jac
 
@@ -149,9 +169,9 @@ class TobitRegressor(BaseEstimator, RegressorMixin):
         return -self._tobit_neg_log_likelihood(X, y, [*self.coef_, self.sigma_])
 
     def get_params(self, deep=True):
-        # suppose this estimator has parameters "alpha" and "recursive"
         return {
             "C": self._C,
+            "alpha": self._alpha,
             "p_censor_left": self._p_censor_left,
             "p_censor_right": self._p_censor_right,
             "verbose": self._verbose,
