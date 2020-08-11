@@ -54,7 +54,7 @@ class TobitRegressor(BaseEstimator, RegressorMixin):
         # Construct the result
         self.ols_coef_ = b0[1:]
         self.ols_intercept = b0[0]
-        self.intercept_ = result.x[1]
+        self.intercept_ = result.x[0]
         self.coef_ = result.x[1:-1]
         self.sigma_ = result.x[-1]
         return self
