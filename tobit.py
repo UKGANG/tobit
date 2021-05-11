@@ -46,8 +46,10 @@ class TobitRegressor(BaseEstimator, RegressorMixin):
         params0 = np.append(b0, s0)
 
         # L-BFGS-B optimization
-        result = scipy.optimize.minimize(lambda params: self._tobit_neg_log_likelihood(X, y, params), params0, method='L-BFGS-B',
-                          jac=lambda params: self._tobit_neg_log_likelihood_der(X, y, params), options={'disp': self._verbose})
+        result = scipy.optimize.minimize(lambda params: self._tobit_neg_log_likelihood(X, y, params), params0,
+                                         method='L-BFGS-B',
+                                         jac=lambda params: self._tobit_neg_log_likelihood_der(X, y, params),
+                                         options={'disp': self._verbose})
         if self._verbose:
             print(result)
 
@@ -84,11 +86,11 @@ class TobitRegressor(BaseEstimator, RegressorMixin):
         cens = False
         if len(idx_left) > 0:
             cens = True
-            left = (y_left - x_left@b)
+            left = (y_left - x_left @ b)
             to_cat.append(left)
         if len(idx_right) > 0:
             cens = True
-            right = (x_right@b - y_right)
+            right = (x_right @ b - y_right)
             to_cat.append(right)
         if cens:
             concat_stats = np.concatenate(to_cat, axis=0) / s
@@ -98,7 +100,7 @@ class TobitRegressor(BaseEstimator, RegressorMixin):
             cens_sum = 0
 
         if len(idx_mid) > 0:
-            mid_stats = (y_mid - x_mid@b) / s
+            mid_stats = (y_mid - x_mid @ b) / s
             mid = scipy.stats.norm.logpdf(mid_stats) - math.log(max(np.finfo('float').resolution, s))
             mid_sum = mid.sum()
         else:
@@ -121,37 +123,36 @@ class TobitRegressor(BaseEstimator, RegressorMixin):
             df.reset_index(drop=True, inplace=True)
 
         b = params[:-1]
-        # s = math.exp(params[-1]) # in censReg, not using chain rule as below; they optimize in terms of log(s)
         s = params[-1]
 
         beta_jac = np.zeros(len(b))
         sigma_jac = 0
 
         if len(idx_left) > 0:
-            left_stats = (y_left - x_left@b) / s
+            left_stats = (y_left - x_left @ b) / s
             l_pdf = scipy.stats.norm.logpdf(left_stats)
             l_cdf = scipy.special.log_ndtr(left_stats)
             left_frac = np.exp(l_pdf - l_cdf)
-            beta_left = left_frac@(x_left / s)
+            beta_left = left_frac @ (x_left / s)
             beta_jac -= beta_left
 
-            left_sigma = left_frac@left_stats
+            left_sigma = left_frac @ left_stats
             sigma_jac -= left_sigma
 
         if len(idx_right) > 0:
-            right_stats = (x_right@b - y_right) / s
+            right_stats = (x_right @ b - y_right) / s
             r_pdf = scipy.stats.norm.logpdf(right_stats)
             r_cdf = scipy.special.log_ndtr(right_stats)
             right_frac = np.exp(r_pdf - r_cdf)
-            beta_right = right_frac@(x_right / s)
+            beta_right = right_frac @ (x_right / s)
             beta_jac += beta_right
 
-            right_sigma = right_frac@right_stats
+            right_sigma = right_frac @ right_stats
             sigma_jac -= right_sigma
 
         if len(idx_mid) > 0:
-            mid_stats = (y_mid - x_mid@b) / s
-            beta_mid = mid_stats@(x_mid / s)
+            mid_stats = (y_mid - x_mid @ b) / s
+            beta_mid = mid_stats @ (x_mid / s)
             beta_jac += beta_mid
 
             mid_sigma = (np.square(mid_stats) - 1).sum()
